@@ -10,40 +10,35 @@ from fastapi.testclient import TestClient
 
 from script import app, get_db
 
-# ============================================================
 # 1. Фикстура для изолированной БД в памяти на каждый тест
-# ============================================================
+
 @pytest.fixture(autouse=True)
 def setup_test_db():
-    """Создает единую БД в памяти для всех запросов внутри одного теста."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Создаем таблицы
     cursor.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     cursor.execute("CREATE TABLE cities (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, name))")
     cursor.execute("CREATE TABLE forecasts (city_id INTEGER NOT NULL, forecast_date TEXT NOT NULL, forecast_time TEXT NOT NULL, temperature REAL, humidity REAL, wind_speed REAL, precipitation REAL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (city_id, forecast_date, forecast_time))")
     conn.commit()
 
-    # Подменяем зависимость FastAPI, чтобы все запросы в тесте использовали этот conn
     def override_get_db():
         yield conn
 
     app.dependency_overrides[get_db] = override_get_db
 
-    yield conn  # Передаем подключение тесту, если оно нужно для прямой проверки
+    yield conn  
 
-    # Очистка после завершения теста
     app.dependency_overrides = {}
     conn.close()
 
 
 client = TestClient(app)
 
-# ============================================================
+
 # 2. Фиктивные данные (Mocks) для Open-Meteo
-# ============================================================
+
 MOCK_CURRENT_RESPONSE = {
     "latitude": 55.75,
     "longitude": 37.61,
@@ -77,9 +72,8 @@ def mock_open_meteo_hourly(*args, **kwargs):
     mock_resp.raise_for_status = MagicMock()
     return mock_resp
 
-# ============================================================
+
 # 3. Юнит-тесты
-# ============================================================
 
 @patch("httpx.AsyncClient.get", side_effect=mock_open_meteo_current)
 def test_get_current_weather(mock_get):
@@ -128,7 +122,6 @@ def test_track_city(mock_get, setup_test_db):
     assert response.status_code == 201
     assert "успешно добавлен" in response.json()["message"]
 
-    # Проверяем через прямое подключение к тестовой БД
     cursor = setup_test_db.cursor()
     cursor.execute("SELECT name FROM cities WHERE user_id = ?", (user_id,))
     assert cursor.fetchone()["name"] == "london"
@@ -145,12 +138,10 @@ def test_get_city_weather_at_time_filtered(setup_test_db):
         json={"city_name": "Paris", "latitude": 48.8, "longitude": 2.3}
     )
 
-    # Вручную добавляем тестовый прогноз в БД (эмулируем работу фоновой задачи)
     cursor = setup_test_db.cursor()
     cursor.execute("SELECT id FROM cities WHERE name = 'paris' AND user_id = ?", (user_id,))
     city_id = cursor.fetchone()["id"]
 
-    # ИСПРАВЛЕНИЕ: используем сегодняшнюю дату вместо хардкода
     from datetime import date
     today = date.today().isoformat()
 
@@ -160,13 +151,15 @@ def test_get_city_weather_at_time_filtered(setup_test_db):
     """, (city_id, today))
     setup_test_db.commit()
 
-    # Делаем запрос, запрашивая ТОЛЬКО температуру и ветер
     response = client.get(
         "/weather/city/paris",
         params={
             "user_id": user_id,
             "time": "12:00",
-            "params": ["temperature", "wind_speed"]
+            "temperature": True,
+            "wind_speed": True,
+            "humidity": False,
+            "precipitation": False
         }
     )
 
@@ -178,14 +171,12 @@ def test_get_city_weather_at_time_filtered(setup_test_db):
     assert "wind_speed_kmh" in data
     assert data["wind_speed_kmh"] == 15.0
 
-    # Критически важно: запрашиваемые параметры НЕ должны содержать лишнего
+
     assert "humidity_percent" not in data
     assert "precipitation_mm" not in data
 
 def test_get_weather_invalid_time_format():
     """Тест 6: Валидация формата времени (должна быть ошибка 400)."""
-    # Благодаря тому, что мы перенесли проверку времени в начало функции в script.py,
-    # эта ошибка 400 вернется даже если города нет в БД (валидация входных данных приоритетнее).
     response = client.get(
         "/weather/city/london",
         params={"user_id": 999, "time": "1200", "params": ["temperature"]}
