@@ -1,7 +1,3 @@
-"""
-Weather API Service (Multi-user)
-Сервис для получения и отслеживания прогноза погоды через Open-Meteo.
-"""
 import asyncio
 import logging
 import sqlite3
@@ -14,15 +10,13 @@ from fastapi import FastAPI, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, ConfigDict
 from pydantic_settings import BaseSettings
 
-# ============================================================
 # 1. Конфигурация
-# ============================================================
 class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     open_meteo_url: str = "https://api.open-meteo.com/v1/forecast"
     db_file: str = "weather.db"
-    update_interval_seconds: int = 900  # 15 минут
+    update_interval_seconds: int = 900
     request_timeout: float = 10.0
 
     model_config = ConfigDict(
@@ -32,20 +26,15 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# ============================================================
 # 2. Логирование
-# ============================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("weather_api")
 
-# ============================================================
 # 3. Работа с базой данных (SQLite)
-# ============================================================
 def get_db():
-    """Генератор для получения подключения к БД."""
     conn = sqlite3.connect(settings.db_file, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
@@ -54,11 +43,10 @@ def get_db():
         conn.close()
 
 def init_db():
-    """Инициализация таблиц БД при запуске."""
     with sqlite3.connect(settings.db_file) as conn:
         cursor = conn.cursor()
 
-        # 1. Таблица пользователей
+        # 1) Таблица пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +55,7 @@ def init_db():
             )
         """)
 
-        # 2. Таблица городов (привязана к user_id)
+        # 2) Таблица городов (привязана к user_id)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +69,7 @@ def init_db():
             )
         """)
 
-        # 3. Таблица почасовых прогнозов
+        # 3) Таблица почасовых прогнозов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS forecasts (
                 city_id INTEGER NOT NULL,
@@ -99,9 +87,8 @@ def init_db():
         conn.commit()
     logger.info("База данных инициализирована (Multi-user schema).")
 
-# ============================================================
+
 # 4. Pydantic-модели
-# ============================================================
 class CurrentWeatherResponse(BaseModel):
     latitude: float
     longitude: float
@@ -127,9 +114,8 @@ class CityResponse(BaseModel):
     latitude: float
     longitude: float
 
-# ============================================================
+
 # 5. Создание FastAPI-приложения
-# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -143,11 +129,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# ============================================================
 # 6. Фоновая задача (обновление каждые 15 минут)
-# ============================================================
 async def update_forecasts_background_task():
-    """Периодически обновляет прогноз для ВСЕХ городов в БД."""
     logger.info("Фоновая задача обновления запущена.")
     while True:
         await asyncio.sleep(settings.update_interval_seconds)
@@ -170,7 +153,6 @@ async def update_forecasts_background_task():
             logger.error(f"[ФОН] Критическая ошибка в цикле обновления: {e}")
 
 async def fetch_and_save_forecast(client: httpx.AsyncClient, city_id: int, lat: float, lon: float):
-    """Загружает почасовой прогноз с Open-Meteo и сохраняет в БД."""
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -205,13 +187,11 @@ async def fetch_and_save_forecast(client: httpx.AsyncClient, city_id: int, lat: 
         """, insert_data)
         conn.commit()
 
-# ============================================================
+
 # 7. Эндпоинты API
-# ============================================================
 
 @app.post("/users/register", response_model=UserResponse, status_code=201, summary="Регистрация пользователя")
 async def register_user(user_req: UserCreateRequest, db: sqlite3.Connection = Depends(get_db)):
-    """Создает нового пользователя и возвращает его ID."""
     cursor = db.cursor()
     try:
         cursor.execute("INSERT INTO users (username) VALUES (?)", (user_req.username,))
@@ -227,7 +207,6 @@ async def get_current_weather(
         latitude: float = Query(..., ge=-90, le=90),
         longitude: float = Query(..., ge=-180, le=180),
 ):
-    """Возвращает температуру, скорость ветра и атмосферное давление на момент запроса."""
     logger.info(f"Запрос текущей погоды: lat={latitude}, lon={longitude}")
     params = {
         "latitude": latitude,
@@ -261,7 +240,6 @@ async def track_city(
         city_req: CityTrackRequest = ...,
         db: sqlite3.Connection = Depends(get_db)
 ):
-    """Добавляет город в список отслеживания конкретного пользователя и сразу загружает прогноз."""
     cursor = db.cursor()
 
     cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
@@ -303,7 +281,6 @@ async def get_tracked_cities(
     user_id: int = Query(..., description="ID пользователя"),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Возвращает список городов, отслеживаемых конкретным пользователем."""
     cursor = db.cursor()
     cursor.execute("SELECT name, latitude, longitude FROM cities WHERE user_id = ?", (user_id,))
     rows = cursor.fetchall()
@@ -320,25 +297,25 @@ async def get_tracked_cities(
 
 @app.get("/weather/city/{city_name}", summary="Прогноз в городе на конкретное время")
 async def get_city_weather_at_time(
-    city_name: str,
-    user_id: int = Query(..., description="ID пользователя"),
-    time: str = Query(..., description="Время в формате ЧЧ:ММ (например, 14:00)"),
-    params: List[Literal["temperature", "humidity", "wind_speed", "precipitation"]] = Query(
-        default=["temperature"],
-        description="Список запрашиваемых параметров"
-    ),
-    db: sqlite3.Connection = Depends(get_db)
+        city_name: str,
+        user_id: int = Query(..., description="ID пользователя"),
+        time: str = Query(..., description="Время в формате ЧЧ:ММ (например, 14:00)"),
+        temperature: bool = Query(False, description="Включить температуру"),
+        humidity: bool = Query(False, description="Включить влажность"),
+        wind_speed: bool = Query(False, description="Включить скорость ветра"),
+        precipitation: bool = Query(False, description="Включить осадки"),
+        db: sqlite3.Connection = Depends(get_db)
 ):
-    """Возвращает погоду для города конкретного пользователя на указанное время."""
 
-    # 1. Сначала валидация формата времени (до запроса к БД)
     if len(time) != 5 or time[2] != ':':
         raise HTTPException(status_code=400, detail="Неверный формат времени. Используйте ЧЧ:ММ")
+
+    if not any([temperature, humidity, wind_speed, precipitation]):
+        raise HTTPException(status_code=400, detail="Выберите хотя бы один параметр погоды")
 
     city_name_normalized = city_name.strip().lower()
     cursor = db.cursor()
 
-    # 2. Ищем город в БД
     cursor.execute("SELECT id, name FROM cities WHERE name = ? AND user_id = ?", (city_name_normalized, user_id))
     city = cursor.fetchone()
     if not city:
@@ -349,7 +326,6 @@ async def get_city_weather_at_time(
 
     today_str = date.today().isoformat()
 
-    # 3. Ищем прогноз на это время
     cursor.execute("""
         SELECT temperature, humidity, wind_speed, precipitation 
         FROM forecasts 
@@ -363,29 +339,25 @@ async def get_city_weather_at_time(
             detail=f"Прогноз на {today_str} {time} для города '{city['name']}' не найден."
         )
 
-    # 4. Формируем динамический ответ только с запрошенными параметрами
     result = {
         "city_name": city["name"],
         "date": today_str,
         "time": time
     }
 
-    param_mapping = {
-        "temperature": ("temperature_c", forecast["temperature"]),
-        "humidity": ("humidity_percent", forecast["humidity"]),
-        "wind_speed": ("wind_speed_kmh", forecast["wind_speed"]),
-        "precipitation": ("precipitation_mm", forecast["precipitation"])
-    }
-
-    for p in params:
-        key, value = param_mapping[p]
-        result[key] = value
+    if temperature:
+        result["temperature_c"] = forecast["temperature"]
+    if humidity:
+        result["humidity_percent"] = forecast["humidity"]
+    if wind_speed:
+        result["wind_speed_kmh"] = forecast["wind_speed"]
+    if precipitation:
+        result["precipitation_mm"] = forecast["precipitation"]
 
     return result
 
-# ============================================================
+
 # 8. Точка входа
-# ============================================================
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Запуск сервера на {settings.app_host}:{settings.app_port}/docs")
